@@ -1,0 +1,1 @@
+web: gunicorn Tracking_BE.wsgi
