@@ -23,6 +23,7 @@ def home(request):
     return HttpResponse("django backend is live on server")
 
 urlpatterns = [
+    path('', home),
     path('admin/', admin.site.urls),
     path('login/', include('login.urls')), 
     path('organization/', include('organization.urls')),  
