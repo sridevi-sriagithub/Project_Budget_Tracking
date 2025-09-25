@@ -413,6 +413,7 @@ class ProjectPaymentTrackingSerializer(serializers.ModelSerializer):
     payout_variance = serializers.SerializerMethodField()
     created_by = serializers.SerializerMethodField()
     modified_by = serializers.SerializerMethodField()
+    total_payout = serializers.SerializerMethodField()
 
     class Meta:
         model = ProjectPaymentTracking
@@ -425,7 +426,7 @@ class ProjectPaymentTrackingSerializer(serializers.ModelSerializer):
             "total_holds_amount", "pending", "budget_utilization_percentage",
             "is_budget_locked", "budget_exceeded_approved",
             "created_by", "modified_by", "created_at", "modified_at",
-            "milestones", "holds",
+            "milestones", "holds","total_payout",
         ]
         read_only_fields = [
             "created_at", "modified_at", "total_available_budget", "total_milestones_amount",
@@ -434,35 +435,46 @@ class ProjectPaymentTrackingSerializer(serializers.ModelSerializer):
             "milestones", "holds",
         ]
 
+    def _safe_decimal(self, value):
+        try:
+            return str(Decimal(value))
+        except Exception:
+            return "0.00"
+    def get_total_payout(self, obj):
+        milestones_total = sum(m.amount for m in obj.milestones.all())
+        return float(obj.payout or 0) + float(milestones_total)
+    
+
     def get_total_available_budget(self, obj):
-        return str(obj.total_available_budget)
+        return self._safe_decimal(getattr(obj, "total_available_budget", 0))
 
     def get_total_milestones_amount(self, obj):
-        return str(obj.total_milestones_amount)
+        return self._safe_decimal(getattr(obj, "total_milestones_amount", 0))
 
     def get_completed_milestones_amount(self, obj):
-        return str(obj.completed_milestones_amount)
+        return self._safe_decimal(getattr(obj, "completed_milestones_amount", 0))
 
     def get_calculated_payout_from_milestones(self, obj):
-        return str(obj.calculated_payout_from_milestones)
+        return self._safe_decimal(getattr(obj, "calculated_payout_from_milestones", 0))
 
     def get_total_holds_amount(self, obj):
-        return str(obj.total_holds_amount)
+        return self._safe_decimal(getattr(obj, "total_holds_amount", 0))
 
     def get_pending(self, obj):
-        return str(obj.pending)
+        return self._safe_decimal(getattr(obj, "pending", 0))
 
     def get_budget_utilization_percentage(self, obj):
-        return str(obj.budget_utilization_percentage)
+        return self._safe_decimal(getattr(obj, "budget_utilization_percentage", 0))
 
     def get_payout_variance(self, obj):
-        return str(obj.payout_variance)
+        return self._safe_decimal(getattr(obj, "payout_variance", 0))
 
     def get_created_by(self, obj):
         return getattr(obj.created_by, "username", None) if obj.created_by else None
 
     def get_modified_by(self, obj):
         return getattr(obj.modified_by, "username", None) if obj.modified_by else None
+
 class ProjectPaymentTrackingUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProjectPaymentTracking

@@ -34,8 +34,12 @@ import uuid, os
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from django.http import FileResponse, Http404
-
-    
+from django.db.models.functions import Coalesce
+from decimal import Decimal
+from django.db.models import Sum, Value
+from django.db.models import DecimalField
+from rest_framework.exceptions import ValidationError as DRFValidationError
+from django.core.exceptions import ValidationError
 class EstimationCreateAPIView(APIView):
     permission_classes = [IsAuthenticated]
     authentication_classes = [JWTAuthentication]
@@ -251,78 +255,64 @@ class PaymentListCreateAPIView(APIView):
         except Exception as e:
             print(traceback.format_exc())
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+   
 
-    # def put(self, request, project_id, payment_id):
-    #     """Update an existing payment record"""
-    #     project = get_object_or_404(Project, id=project_id)
-    #     payment = get_object_or_404(ProjectPaymentTracking, id=payment_id, project_id=project_id)
-    #     data = request.data.copy()
 
-    #     if "approved_budget" in data:
-    #         try:
-    #             approved_budget = Decimal(str(data.get("approved_budget", "0.00")))
-    #         except Exception:
-    #             return Response({"error": "approved_budget invalid"}, status=status.HTTP_400_BAD_REQUEST)
 
-    #         validation = validate_payment_against_policy(project, approved_budget, user=request.user)
-    #         if not validation["allowed"]:
-    #             return Response({"error": validation["message"]}, status=status.HTTP_400_BAD_REQUEST)
-    #         data["approved_budget"] = str(validation["adjusted_amount"])
+    def put(self, request, payment_id):
+        try:
+            payment = get_object_or_404(ProjectPaymentTracking, id=payment_id)
+            data = request.data.copy()
 
-    #     serializer = ProjectPaymentTrackingSerializer(payment, data=data, partial=True)
-    #     if serializer.is_valid():
-    #         serializer.save()
+            action = request.query_params.get('action')
 
-    #         # Run sync monitor service + async background tasks
-    #         BudgetMonitorService.monitor_project(project)
-    #         recalculate_project_finances.delay(project_id)
-    #         send_budget_alerts.delay(project_id)
+            if action == 'auto_calculate_payout':
+                payment.auto_calculate_payout(modified_by=request.user if request.user.is_authenticated else None)
+                message = "Payout auto-calculated from milestones"
 
-    #         return Response({"message": "Updated", "payment": serializer.data}, status=status.HTTP_200_OK)
-    #     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    # def put(self, request, project_id, payment_id):
-    #     project = get_object_or_404(Project, id=project_id)
-    #     payment = get_object_or_404(ProjectPaymentTracking, id=payment_id, project_id=project_id)
-    #     data = request.data.copy()
+            elif action == 'set_manual_payout' and 'payout' in data:
+                try:
+                    payment.set_manual_payout(
+                        amount=data['payout'],
+                        modified_by=request.user if request.user.is_authenticated else None
+                    )
+                    message = "Manual payout set successfully"
+                except ValidationError as e:
+                    raise DRFValidationError(detail=e.messages)
 
-    #     # ✅ Handle approved_budget validation
-    #     if "approved_budget" in data:
-    #         try:
-    #             approved_budget = Decimal(str(data.get("approved_budget", "0.00")))
-    #         except Exception:
-    #             return Response({"error": "approved_budget invalid"}, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                serializer = ProjectPaymentTrackingSerializer(payment, data=data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                saved_instance = serializer.save(modified_by=request.user if request.user.is_authenticated else None)
+                message = "Updated successfully"
 
-    #         validation = validate_payment_against_policy(project, approved_budget, user=request.user)
-    #         if not validation["allowed"]:
-    #             return Response({"error": validation["message"]}, status=status.HTTP_400_BAD_REQUEST)
+            # Background tasks
+            try:
+                BudgetMonitorService.monitor_project(payment.project)
+                recalculate_project_finances.delay(payment.project.id)
+                send_budget_alerts.delay(payment.project.id)
+            except Exception as e:
+                print(f"⚠️ Background task error: {e}")
 
-    #         data["approved_budget"] = str(validation["adjusted_amount"])
+            serializer = ProjectPaymentTrackingSerializer(payment)
+            return Response({
+                "message": message,
+                "payment": serializer.data,
+                "payout_info": {
+                    "is_manual": payment.is_payout_manual,
+                    "calculated_from_milestones": str(payment.calculated_payout_from_milestones),
+                    "variance": str(payment.payout_variance)
+                }
+            }, status=status.HTTP_200_OK)
 
-    #     serializer = ProjectPaymentTrackingSerializer(payment, data=data, partial=True)
-    #     if serializer.is_valid():
-    #         try:
-    #             serializer.save(modified_by=request.user)  # ✅ ensure modified_by is set
-    #         except Exception as e:
-    #             # ✅ log exact error instead of 500
-    #             import traceback
-    #             print("ERROR in serializer.save:", traceback.format_exc())
-    #             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except DRFValidationError as ve:
+            return Response({"error": ve.detail}, status=status.HTTP_400_BAD_REQUEST)
 
-    #         # Run background tasks safely
-    #         try:
-    #             BudgetMonitorService.monitor_project(project)
-    #         except Exception as e:
-    #             print("BudgetMonitorService error:", str(e))
+        except Exception as e:
+            import traceback
+            print(traceback.format_exc())
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-    #         try:
-    #             recalculate_project_finances.delay(project_id)
-    #             send_budget_alerts.delay(project_id)
-    #         except Exception as e:
-    #             print("Celery task error:", str(e))
-
-    #         return Response({"message": "Updated", "payment": serializer.data}, status=status.HTTP_200_OK)
-
-    #     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     # def put(self, request, payment_id):
     #     print("=== PUT REQUEST DEBUG ===")
@@ -334,48 +324,51 @@ class PaymentListCreateAPIView(APIView):
     #         project = payment.project
     #         data = request.data.copy()
 
-    #         # Handle budget validation if needed
+    #         # Handle budget validation if provided
     #         if "approved_budget" in data:
     #             approved_budget = Decimal(str(data.get("approved_budget", "0.00")))
-    #             # Add your validation logic here
-                
-    #         # Handle payout actions
+    #             # Add any validation logic if required
+
+    #         # Handle payout actions explicitly
     #         action = request.query_params.get('action')
-            
+
     #         if action == 'auto_calculate_payout':
-    #             # Force auto-calculation of payout
+    #             # Auto-calc payout from milestones
     #             payment.auto_calculate_payout()
-    #             payment.save(modified_by=request.user if request.user.is_authenticated else None)
-    #             serializer = ProjectPaymentTrackingSerializer(payment)
-    #             return Response({
-    #                 "message": "Payout auto-calculated from milestones",
-    #                 "payment": serializer.data
-    #             }, status=status.HTTP_200_OK)
-            
+    #             payment.is_payout_manual = False
+    #             if request.user.is_authenticated:
+    #                 payment.modified_by = request.user
+    #             payment.save()
+
     #         elif action == 'set_manual_payout' and 'payout' in data:
-    #             # Explicitly set manual payout
-    #             payment.set_manual_payout(data['payout'])
-    #             payment.save(modified_by=request.user if request.user.is_authenticated else None)
-    #             serializer = ProjectPaymentTrackingSerializer(payment)
-    #             return Response({
-    #                 "message": "Manual payout set successfully",
-    #                 "payment": serializer.data
-    #             }, status=status.HTTP_200_OK)
+    #             # Manual payout
+    #             payout_value = Decimal(str(data['payout']))
+    #             payment.set_manual_payout(payout_value)
+    #             if request.user.is_authenticated:
+    #                 payment.modified_by = request.user
+    #             payment.save()
 
-    #         # Regular update
-    #         serializer = ProjectPaymentTrackingSerializer(payment, data=data, partial=True)
+    #         else:
+    #             # Regular update, but handle manual payout if provided
+    #             if 'payout' in data:
+    #                 payout_value = Decimal(str(data.pop('payout')))
+    #                 payment.set_manual_payout(payout_value)
+    #                 if request.user.is_authenticated:
+    #                     payment.modified_by = request.user
+    #                 payment.save()
 
-    #         if not serializer.is_valid():
-    #             print(f"❌ Serializer errors: {serializer.errors}")
-    #             return Response({"error": "Validation failed", "details": serializer.errors}, 
-    #                         status=status.HTTP_400_BAD_REQUEST)
+    #             serializer = ProjectPaymentTrackingSerializer(payment, data=data, partial=True)
+    #             if not serializer.is_valid():
+    #                 print(f"❌ Serializer errors: {serializer.errors}")
+    #                 return Response(
+    #                     {"error": "Validation failed", "details": serializer.errors},
+    #                     status=status.HTTP_400_BAD_REQUEST
+    #                 )
+    #             if request.user.is_authenticated:
+    #                 payment.modified_by = request.user
+    #             serializer.save()
 
-    #         # Save with modified_by
-    #         modified_by = request.user if request.user.is_authenticated else None
-    #         saved_instance = serializer.save(modified_by=modified_by)
-    #         print(f"✅ Saved: {saved_instance}")
-
-    #         # Background tasks
+    #         # Run background tasks
     #         try:
     #             BudgetMonitorService.monitor_project(project)
     #             recalculate_project_finances.delay(project.id)
@@ -383,13 +376,14 @@ class PaymentListCreateAPIView(APIView):
     #         except Exception as e:
     #             print(f"⚠️ Background tasks error: {str(e)}")
 
+    #         serializer = ProjectPaymentTrackingSerializer(payment)
     #         return Response({
     #             "message": "Updated successfully",
     #             "payment": serializer.data,
     #             "payout_info": {
-    #                 "is_manual": saved_instance.is_payout_manual,
-    #                 "calculated_from_milestones": str(saved_instance.calculated_payout_from_milestones),
-    #                 "variance": str(saved_instance.payout_variance) if saved_instance.is_payout_manual else "0.00"
+    #                 "is_manual": payment.is_payout_manual,
+    #                 "calculated_from_milestones": str(payment.calculated_payout_from_milestones),
+    #                 "variance": str(payment.payout_variance) if payment.is_payout_manual else "0.00"
     #             }
     #         }, status=status.HTTP_200_OK)
 
@@ -398,95 +392,6 @@ class PaymentListCreateAPIView(APIView):
     #         import traceback
     #         print(traceback.format_exc())
     #         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    def put(self, request, payment_id):
-        print("=== PUT REQUEST DEBUG ===")
-        print(f"Payment ID: {payment_id}")
-        print(f"Request data: {request.data}")
-
-        try:
-            payment = get_object_or_404(ProjectPaymentTracking, id=payment_id)
-            project = payment.project
-            data = request.data.copy()
-
-            # Handle budget validation if needed
-            if "approved_budget" in data:
-                approved_budget = Decimal(str(data.get("approved_budget", "0.00")))
-                # Add your validation logic here
-
-            # Handle payout actions
-            action = request.query_params.get('action')
-
-            if action == 'auto_calculate_payout':
-                # Force auto-calculation of payout from milestones
-                payment.auto_calculate_payout()
-                payment.is_payout_manual = False
-                payment.save(modified_by=request.user if request.user.is_authenticated else None)
-                serializer = ProjectPaymentTrackingSerializer(payment)
-                return Response({
-                    "message": "Payout auto-calculated from milestones",
-                    "payment": serializer.data
-                }, status=status.HTTP_200_OK)
-
-            elif action == 'set_manual_payout' and 'payout' in data:
-                # Explicitly set manual payout
-                payout_value = Decimal(str(data['payout']))
-                payment.set_manual_payout(payout_value)
-                payment.is_payout_manual = True
-                payment.save(modified_by=request.user if request.user.is_authenticated else None)
-                serializer = ProjectPaymentTrackingSerializer(payment)
-                return Response({
-                    "message": "Manual payout set successfully",
-                    "payment": serializer.data
-                }, status=status.HTTP_200_OK)
-
-            # =====================
-            # Regular update branch
-            # =====================
-            # 🚨 Prevent payout overwrite during normal update
-            if "payout" in data:
-                data.pop("payout")
-
-            serializer = ProjectPaymentTrackingSerializer(payment, data=data, partial=True)
-
-            if not serializer.is_valid():
-                print(f"❌ Serializer errors: {serializer.errors}")
-                return Response(
-                    {"error": "Validation failed", "details": serializer.errors},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Save with modified_by
-            modified_by = request.user if request.user.is_authenticated else None
-            saved_instance = serializer.save(modified_by=modified_by)
-            print(f"✅ Saved: {saved_instance}")
-
-            # Background tasks
-            try:
-                BudgetMonitorService.monitor_project(project)
-                recalculate_project_finances.delay(project.id)
-                send_budget_alerts.delay(project.id)
-            except Exception as e:
-                print(f"⚠️ Background tasks error: {str(e)}")
-
-            return Response({
-                "message": "Updated successfully",
-                "payment": serializer.data,
-                "payout_info": {
-                    "is_manual": saved_instance.is_payout_manual,
-                    "calculated_from_milestones": str(saved_instance.calculated_payout_from_milestones),
-                    "variance": str(saved_instance.payout_variance) if saved_instance.is_payout_manual else "0.00"
-                }
-            }, status=status.HTTP_200_OK)
-
-
-
-        except Exception as e:
-            print(f"❌ ERROR: {str(e)}")
-            import traceback
-            print(traceback.format_exc())
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
     def delete(self, request, pk):
         """Delete a payment record"""
@@ -584,6 +489,18 @@ class ReleaseHoldView(APIView):
         hold.save()
         serializer = HoldSerializer(hold)
         return Response(serializer.data, status=status.HTTP_200_OK)
+    def get(self, request):
+        try:
+            holds = Hold.objects.all()  # Fetch all hold records
+            serializer = HoldSerializer(holds, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            print("ERROR:", e)
+            traceback.print_exc()
+            return Response(
+                {"error": "Internal server error", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 from django.db.models import Sum
 class MilestoneListCreateAPIView(APIView):
     permission_classes = [IsAuthenticated]

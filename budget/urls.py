@@ -23,6 +23,7 @@ urlpatterns = [
     path('projects/<int:pk>/add-hold/', AddHoldView.as_view(), name='add-hold'),
     path('holds/', AddHoldView.as_view(), name='holds-list'),
     path('holds/<int:hold_id>/release/', ReleaseHoldView.as_view(), name='release-hold'),
+    path('holds/release/', ReleaseHoldView.as_view(), name='hold-detail'),
 
     path("milestones/", MilestoneListCreateAPIView.as_view(), name="milestones-list"),
     path("milestones/<int:pk>/", MilestoneDetailAPIView.as_view(), name="milestones-detail"),

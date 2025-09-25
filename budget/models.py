@@ -355,7 +355,7 @@ class ProjectPaymentTracking(models.Model):
         ("Interest", "Interest"),
         ("Other", "Other"),
     ]
-
+ 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="payments")
     payment_type = models.CharField(max_length=50, choices=COST_TYPE_CHOICES)
     resource = models.ForeignKey(MasterData, on_delete=models.SET_NULL, null=True, blank=True, related_name="payments")
@@ -363,6 +363,7 @@ class ProjectPaymentTracking(models.Model):
     approved_budget = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal("0.00"))
     additional_amount = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal("0.00"))
     payout = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal("0.00"))
+    
     is_payout_manual = models.BooleanField(default=False, help_text="True if payout was manually set")
     retention_amount = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal("0.00"))
     penalty_amount = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal("0.00"))
@@ -396,8 +397,10 @@ class ProjectPaymentTracking(models.Model):
         )["total"]
         return Decimal(total or 0)
 
+
     @property
     def calculated_payout_from_milestones(self) -> Decimal:
+        """Sum of COMPLETED milestone amounts. Safe if no pk."""
         if not self.pk:
             return Decimal("0.00")
         total = self.milestones.filter(status="Completed").aggregate(
@@ -420,7 +423,7 @@ class ProjectPaymentTracking(models.Model):
     @property
     def total_holds_amount(self) -> Decimal:
         """Return total active holds, but avoid querying before instance has a pk."""
-        if not self.pk:  # New object, no holds yet
+        if not self.pk:
             return Decimal("0.00")
         total = self.holds.filter(is_active=True).aggregate(
             total=Coalesce(Sum("amount"), Value(Decimal("0.00")))
@@ -428,15 +431,21 @@ class ProjectPaymentTracking(models.Model):
         return Decimal(total or 0)
 
     @property
+    def total_payout(self) -> Decimal:
+        """Use higher of manual payout or milestones sum to avoid double-counting."""
+        milestones_total = self.calculated_payout_from_milestones
+        manual = self.payout or Decimal("0.00")
+        # Avoid double-counting: if manual < milestones, use milestones
+        return max(manual, milestones_total)
+
+    @property
     def pending(self) -> Decimal:
         return (
             self.total_available_budget
-            - (self.payout or Decimal("0.00"))
+            - self.total_payout
             - self.total_holds_amount
-            - (self.retention_amount or Decimal("0.00"))
             + (self.penalty_amount or Decimal("0.00"))
         )
-
     @property
     def payout_variance(self) -> Decimal:
         if not self.is_payout_manual:
@@ -445,11 +454,10 @@ class ProjectPaymentTracking(models.Model):
 
     @property
     def budget_utilization_percentage(self) -> Decimal:
-        if self.total_available_budget == Decimal("0.00"):
+        if self.total_available_budget == 0:
             return Decimal("0.00")
-        used = (self.payout or Decimal("0.00")) + (self.retention_amount or Decimal("0.00")) + self.total_holds_amount
+        used = self.total_payout + self.total_holds_amount
         return (used / self.total_available_budget * Decimal("100.00")).quantize(Decimal("0.01"))
-
     @property
     def is_budget_exceeded(self) -> bool:
         return self.total_milestones_amount > self.total_available_budget
@@ -472,242 +480,96 @@ class ProjectPaymentTracking(models.Model):
     #             f"Budget exceeded! Allowed: {self.total_available_budget}, Attempted: {total_used}"
     #         )
     def validate_budget_limit(self, new_payout=None):
-        """Ensure payout + holds + retention <= total budget"""
-        payout_to_check = Decimal(new_payout) if new_payout is not None else (self.payout or Decimal("0.00"))
-
-        # On create, skip holds since they cannot exist yet
-        holds_amount = self.total_holds_amount if self.pk else Decimal("0.00")
-
-        total_used = payout_to_check + (self.retention_amount or Decimal("0.00")) + holds_amount
-
+        payout_to_check = Decimal(new_payout) if new_payout is not None else (self.total_payout)
+        total_used = payout_to_check + (self.retention_amount or Decimal("0.00")) + self.total_holds_amount
         if total_used > self.total_available_budget:
-            raise ValidationError(
+            from rest_framework.exceptions import ValidationError as DRFValidationError
+            raise DRFValidationError(
                 f"Budget exceeded! Allowed: {self.total_available_budget}, Attempted: {total_used}"
             )
 
-
-    # def set_manual_payout(self, amount):
-    #     amount = Decimal(str(amount))
-    #     self.validate_budget_limit(new_payout=amount)
-    #     self.payout = amount
-    #     self.is_payout_manual = True
-
-    # def auto_calculate_payout(self):
-    #     if not self.pk:
-    #         return
-    #     self.payout = self.calculated_payout_from_milestones
-    #     self.is_payout_manual = False
-
-    # def recalc_payout(self):
-    #     self.payout = self.calculated_payout_from_milestones
-
-    # def save(self, *args, **kwargs):
-    #     if self.pk:
-    #         # Fetch old instance to check manual changes
-    #         try:
-    #             old = ProjectPaymentTracking.objects.get(pk=self.pk)
-    #             if old.payout != self.payout:
-    #                 self.is_payout_manual = True
-    #             elif not self.is_payout_manual:
-    #                 self.auto_calculate_payout()
-    #         except ProjectPaymentTracking.DoesNotExist:
-    #             pass
-
-    #     if self.is_payout_manual:
-    #         self.validate_budget_limit()
-
-    #     self.budget_exceeded_approved = self.is_budget_exceeded
-    #     super().save(*args, **kwargs)
-    def set_manual_payout(self, amount):
-        """Explicitly set payout manually"""
+    # --- safer manual/auto payout setters ---
+    def set_manual_payout(self, amount, save_instance: bool = True, modified_by=None):
+        """
+        Set a manual payout. Validates budget before setting.
+        Pass save_instance=False if you want to set value then call save() yourself.
+        """
         amount = Decimal(str(amount))
         self.validate_budget_limit(new_payout=amount)
         self.payout = amount
         self.is_payout_manual = True
+        if save_instance:
+            self.save(modified_by=modified_by)
+   
 
-    def auto_calculate_payout(self):
-        """Auto calculate payout from milestones if not manual"""
+    def auto_calculate_payout(self, save_instance: bool = True, modified_by=None):
+        """
+        Apply milestone-calculated payout only if not manual.
+        This method does NOT flip is_payout_manual -> False automatically (caller may decide).
+        """
         if not self.pk:
-            return
-        self.payout = self.calculated_payout_from_milestones
-        self.is_payout_manual = False
-
-    def recalc_payout(self):
-        """Recalculate payout only if automatic"""
-        if not self.is_payout_manual:
-            self.auto_calculate_payout()
-
-    def save(self, *args, **kwargs):
-        if self.pk:
-            old = ProjectPaymentTracking.objects.filter(pk=self.pk).first()
-
-            # If payout was changed manually → mark as manual
-            if old and old.payout != self.payout:
-                self.is_payout_manual = True
-
-            # If not manual → recalc from milestones
-            if not self.is_payout_manual:
-                self.auto_calculate_payout()
+            # nothing to calculate (no related milestones yet)
+            calc = Decimal("0.00")
         else:
-            # On create: if payout > 0 and no milestones exist, treat as manual
+            calc = self.calculated_payout_from_milestones
+
+        if not self.is_payout_manual:
+            # Only overwrite payout when the record is in auto mode
+            self.payout = calc
+
+        if save_instance:
+            self.save(modified_by=modified_by)
+    def recalc_payout(self):
+        """Convenience method used by milestone.save(); respects manual flag."""
+        if not self.is_payout_manual:
+            self.auto_calculate_payout(save_instance=False)
+
+    # --- improved save() ---
+    def save(self, *args, **kwargs):
+        """
+        Important behavior:
+         - If user explicitly changed payout (payout value differs from DB), we mark manual.
+         - We NEVER let a milestone update blindly overwrite an existing manual payout.
+         - Budget validation is always performed with the final payout value.
+         - Accepts kwargs 'modified_by' to set the modified_by FK conveniently.
+        """
+        # allow passing modified_by from serializer or view
+        modified_by = kwargs.pop("modified_by", None)
+        if modified_by:
+            self.modified_by = modified_by
+
+        old = None
+        if self.pk:
+            try:
+                old = ProjectPaymentTracking.objects.get(pk=self.pk)
+            except ProjectPaymentTracking.DoesNotExist:
+                old = None
+
+        # If creating and a positive payout is provided, treat it as manual by default.
+        if not old:
             if self.payout and self.payout > Decimal("0.00"):
                 self.is_payout_manual = True
+        else:
+            # If the payout value has been changed externally (by caller/serializer),
+            # mark the instance as manual so it is preserved until explicitly switched off.
+            if old.payout != self.payout:
+                self.is_payout_manual = True
 
-        # Always validate budget
-        self.validate_budget_limit()
+        # If the object is in auto-mode, keep payout consistent with calculated value.
+        if not self.is_payout_manual:
+            # if pk exists we can compute; on create there are no milestones so payout remains as-is (usually 0)
+            if self.pk:
+                self.payout = self.calculated_payout_from_milestones
 
-        # Update budget exceeded flag
+        # Validate budget against the payout that will be saved
+        self.validate_budget_limit(new_payout=self.payout)
+
+        # Update flag
         self.budget_exceeded_approved = self.is_budget_exceeded
 
         super().save(*args, **kwargs)
 
 
-
-    # def __str__(self):
-    #     return f"{getattr(self.project, 'project_name', self.project_id)} - {self.payment_type} (#{self.id})"
-
-   
-    # @property
-    # def total_available_budget(self) -> Decimal:
-    #     return (self.approved_budget or Decimal("0.00")) + (self.additional_amount or Decimal("0.00"))
-
-    # @property
-    # def total_milestones_amount(self) -> Decimal:
-    #     if not self.pk:
-    #         return Decimal("0.00")
-    #     total = self.milestones.aggregate(
-    #         total=Coalesce(
-    #             Sum("amount"),
-    #             Value(Decimal("0.00"), output_field=DecimalField(max_digits=16, decimal_places=2)),
-    #             output_field=DecimalField(max_digits=16, decimal_places=2)
-    #         )
-    #     )["total"]
-    #     return Decimal(total or 0)
-    # @property
-    # def calculated_payout_from_milestones(self) -> Decimal:
-    #     """Calculate payout based on completed milestones"""
-    #     if not self.pk:
-    #         return Decimal("0.00")
-    #     try:
-    #         total = self.milestones.filter(status="Completed").aggregate(
-    #             total=Coalesce(Sum("amount"), Value(Decimal("0.00")), output_field=DecimalField())
-    #         )["total"]
-    #         return Decimal(total or 0)
-    #     except Exception:
-    #         return Decimal("0.00")
-
-
-    # @property
-    # def completed_milestones_amount(self) -> Decimal:
-    #     if not self.pk:
-    #         return Decimal("0.00")
-    #     total = self.milestones.filter(status="Completed").aggregate(
-    #         total=Coalesce(Sum("amount"), Value(Decimal("0.00")), output_field=DecimalField())
-    #     )["total"]
-    #     return Decimal(total or 0)
-
-    # @property
-    # def total_holds_amount(self) -> Decimal:
-    #     if not self.pk:
-    #         return Decimal("0.00")
-    #     total = self.holds.filter(is_active=True).aggregate(
-    #         total=Coalesce(Sum("amount"), Value(Decimal("0.00")), output_field=DecimalField())
-    #     )["total"]
-    #     return Decimal(total or 0)
-
-    # # @property
-    # # def pending(self) -> Decimal:
-    # #     return (
-    # #         self.total_available_budget
-    # #         - (self.payout or Decimal("0.00"))
-    # #         - self.total_holds_amount
-    # #         - (self.retention_amount or Decimal("0.00"))
-    # #         + (self.penalty_amount or Decimal("0.00"))
-    # #     )
-    # @property
-    # def pending(self) -> Decimal:
-    #     try:
-    #         return (
-    #             self.total_available_budget
-    #             - (self.payout or Decimal("0.00"))
-    #             - self.total_holds_amount
-    #             - (self.retention_amount or Decimal("0.00"))
-    #             + (self.penalty_amount or Decimal("0.00"))
-    #         )
-    #     except Exception:
-    #         return Decimal("0.00")
-        
-    # @property
-    # def payout_variance(self) -> Decimal:
-    #     """Difference between manual payout and calculated payout"""
-    #     if not self.is_payout_manual:
-    #         return Decimal("0.00")
-    #     return (self.payout or Decimal("0.00")) - self.calculated_payout_from_milestones
-
-    # def auto_calculate_payout(self):
-    #     """Auto-calculate payout from completed milestones"""
-    #     if not self.pk:
-    #         return
-    #     calculated = self.calculated_payout_from_milestones
-    #     self.payout = calculated
-    #     self.is_payout_manual = False
-
-    # def set_manual_payout(self, amount):
-    #     """Set manual payout amount"""
-    #     self.payout = Decimal(str(amount))
-    #     self.is_payout_manual = True
-
-    # @property
-    # def budget_utilization_percentage(self) -> Decimal:
-    #     if self.total_available_budget == Decimal("0.00"):
-    #         return Decimal("0.00")
-    #     used = (self.payout or Decimal("0.00")) + (self.retention_amount or Decimal("0.00")) + self.total_holds_amount
-    #     return (used / self.total_available_budget * Decimal("100.00")).quantize(Decimal("0.01"))
-
-    # @property
-    # def is_budget_exceeded(self) -> bool:
-    #     if not self.pk:
-    #         return False
-    #     return self.total_milestones_amount > self.total_available_budget
-
-    # def recalc_payout(self):
-    #     if not self.pk:
-    #         return
-    #     total = self.milestones.filter(status="Completed").aggregate(
-    #         total=Coalesce(Sum("amount"), Value(Decimal("0.00")), output_field=DecimalField())
-    #     )["total"] or Decimal("0.00")
-    #     self.payout = total
-
-    # def save(self, *args, **kwargs):
-    #     # recalc payout only if object already has a PK
-    #     if self.pk:
-    #         try:
-    #             self.recalc_payout()
-    #         except Exception:
-    #             pass
-    #         self.budget_exceeded_approved = self.is_budget_exceeded
-    #     super().save(*args, **kwargs)
-    # def save(self, *args, **kwargs):
-    #     # Check if this is an update and payout field was changed
-    #     if self.pk:
-    #         try:
-    #             old_instance = ProjectPaymentTracking.objects.get(pk=self.pk)
-                
-    #             # If payout was explicitly changed, mark as manual
-    #             if old_instance.payout != self.payout:
-    #                 self.is_payout_manual = True
-                
-    #             # Only auto-recalculate if not manually set
-    #             elif not self.is_payout_manual:
-    #                 self.auto_calculate_payout()
-                    
-    #             self.budget_exceeded_approved = self.is_budget_exceeded
-                
-    #         except (ProjectPaymentTracking.DoesNotExist, Exception):
-    #             # New instance or error, use current payout
-    #             pass
-        
-    #     super().save(*args, **kwargs)
 
 class ProjectPaymentMilestone(models.Model):
     STATUS_CHOICES = [
@@ -739,21 +601,6 @@ class ProjectPaymentMilestone(models.Model):
     def __str__(self):
         return f"{self.name} - {self.amount} [{self.status}]"
 
-    # def save(self, *args, **kwargs):
-    #     is_new = self.pk is None
-    #     old_status = None
-    #     if not is_new:
-    #         try:
-    #             old_status = ProjectPaymentMilestone.objects.get(pk=self.pk).status
-    #         except ProjectPaymentMilestone.DoesNotExist:
-    #             old_status = None
-
-    #     super().save(*args, **kwargs)
-
-    #     if (is_new and self.status == "Completed") or (old_status != "Completed" and self.status == "Completed"):
-    #         tracking = self.payment_tracking
-    #         tracking.recalc_payout()
-    #         tracking.save()
     def save(self, *args, **kwargs):
         is_new = self.pk is None
         old_status = None
@@ -765,11 +612,29 @@ class ProjectPaymentMilestone(models.Model):
 
         super().save(*args, **kwargs)
 
-        # Recalculate payout if milestone is completed
+        # If milestone just became Completed, recalc the tracking payout (but only if tracking is auto-mode)
         if (is_new and self.status == "Completed") or (old_status != "Completed" and self.status == "Completed"):
             tracking = self.payment_tracking
+            # recalc_payout respects is_payout_manual
             tracking.recalc_payout()
+            # Save tracking so pending/percentages update; recalc_payout does not save by default
             tracking.save()
+    # def save(self, *args, **kwargs):
+    #     is_new = self.pk is None
+    #     old_status = None
+    #     if not is_new:
+    #         try:
+    #             old_status = ProjectPaymentMilestone.objects.get(pk=self.pk).status
+    #         except ProjectPaymentMilestone.DoesNotExist:
+    #             old_status = None
+
+    #     super().save(*args, **kwargs)
+
+    #     # Recalculate payout if milestone is completed
+    #     if (is_new and self.status == "Completed") or (old_status != "Completed" and self.status == "Completed"):
+    #         tracking = self.payment_tracking
+    #         tracking.recalc_payout()
+    #         tracking.save()
 
 
 

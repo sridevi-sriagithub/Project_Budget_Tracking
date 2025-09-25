@@ -21,14 +21,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-(%uj8x@5136&3_d6do-s$lew!*omgsf8qr8)-4@qldza2#a3j&'
-# SECRET_KEY=os.environ.get("SECRET_KEY","dev-secret")
+# SECRET_KEY = 'django-insecure-(%uj8x@5136&3_d6do-s$lew!*omgsf8qr8)-4@qldza2#a3j&'
+SECRET_KEY=os.environ.get("SECRET_KEY","dev-secret")
+
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
+DEBUG = True
+DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 # ALLOWED_HOSTS = ["tracking-be.onrender.com", "localhost", "127.0.0.1"]
 ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS= ["project-budget-tracking.onrender.com","localhost", "127.0.0.1"]
 # ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS',
 #                               os.environ.get('KOYEB_PUBLIC_DOMAIN', 'localhost')).split(',')
 
