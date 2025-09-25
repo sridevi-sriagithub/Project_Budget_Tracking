@@ -4,6 +4,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.contrib.auth import authenticate
 from django.contrib.auth.hashers import check_password
+from masterdata.models import MasterData
 
 User = get_user_model()
 class UserSerializer(serializers.ModelSerializer):
@@ -16,6 +17,18 @@ class RegisterSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['username', 'email','id']
+class RegisterGetSerializer(serializers.ModelSerializer):
+    masterdata_id = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'masterdata_id']
+
+    def get_masterdata_id(self, obj):
+        # Check if user has MasterData record
+        masterdata = MasterData.objects.filter(name_of_resource=obj).first()
+        return masterdata.id if masterdata else None
+
        
  
     def validate_email(self, value):

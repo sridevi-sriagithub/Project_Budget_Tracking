@@ -5,7 +5,7 @@ from rest_framework import status, permissions
 from django.contrib.auth import authenticate
 from .models import AbstractUser
 from rest_framework_simplejwt.tokens import RefreshToken
-from .serializers import (UserSerializer,RegisterSerializer,LoginSerializer,LogoutSerializer,
+from .serializers import (UserSerializer,RegisterSerializer,LoginSerializer,LogoutSerializer,RegisterGetSerializer,
                           ForgotPasswordSerializer,ResetPasswordSerializer, NewPassswordSerializer, UserSerializer, ForgotSerializer)
 from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
@@ -86,12 +86,12 @@ class RegisterView(APIView):
         if request.user.is_authenticated and not request.user.is_admin:
             return Response({'error': 'Only admins can register new users'}, status=status.HTTP_403_FORBIDDEN)
 
-        serializer = RegisterSerializer(data=request.data)
+        serializer = RegisterGetSerializer(data=request.data)
     
         
 
         register = User.objects.all()
-        serializer = RegisterSerializer(register, many=True)
+        serializer = RegisterGetSerializer(register, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 

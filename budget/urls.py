@@ -7,7 +7,7 @@ from .views import (
     TransactionCreateAPIView, AdditionalRequestListCreateAPIView,
     AdditionalRequestApproveAPIView, NotificationListAPIView,
     RuleListCreateAPIView, EstimationCreateAPIView,AddHoldView, ReleaseHoldView,ProjectEstimationAPIView,ProjectPaymentTrackingAPIView,ProjectEstimationPaymentAPIView,ProfitLossAdvancedAPIView,
-    ChangeRequestListView, ChangeRequestApproveView, ChangeRequestRejectView,ChangeRequestCreateView,ProjectEstimationChangeAPIView,InvoiceGenerateAPIView,download_invoice
+    ChangeRequestListView, ChangeRequestApproveView, ChangeRequestRejectView,ChangeRequestCreateView,ProjectEstimationChangeAPIView,InvoiceGenerateAPIView,download_invoice,AdditionalRequestRejectAPIView
 )
 
 urlpatterns = [
@@ -18,9 +18,10 @@ urlpatterns = [
     path('project/<int:pk>/estimation/payment/', ProjectEstimationPaymentAPIView.as_view(), name='project-financial-detail'),
     path("project/<int:pk>/estimation/change/", ProjectEstimationChangeAPIView.as_view(), name="project-estimation-change"),
     path("payments/", PaymentListCreateAPIView.as_view(), name="payments-list"),
-    path("payments/<int:pk>/", PaymentListCreateAPIView.as_view(), name="payments-detail"),
+    path("payments/<int:payment_id>/", PaymentListCreateAPIView.as_view(), name="payments-detail"),
 
     path('projects/<int:pk>/add-hold/', AddHoldView.as_view(), name='add-hold'),
+    path('holds/', AddHoldView.as_view(), name='holds-list'),
     path('holds/<int:hold_id>/release/', ReleaseHoldView.as_view(), name='release-hold'),
 
     path("milestones/", MilestoneListCreateAPIView.as_view(), name="milestones-list"),
@@ -31,7 +32,7 @@ urlpatterns = [
 
     path("additional-requests/", AdditionalRequestListCreateAPIView.as_view(), name="additional-list"),
     path("additional-requests/<int:req_id>/approve/", AdditionalRequestApproveAPIView.as_view(), name="additional-approve"),
-    path("additional-requests/<int:req_id>/reject/", AdditionalRequestApproveAPIView.as_view(), name="additional-reject"),
+    path("additional-requests/<int:req_id>/reject/", AdditionalRequestRejectAPIView.as_view(), name="additional-reject"),
 
     # path("projects/<int:project_id>/change-requests/", ChangeRequestListView.as_view(), name="change-request-list"),
     # path("change-requests/<int:cr_id>/approve/", ChangeRequestApproveView.as_view(), name="change-request-approve"),

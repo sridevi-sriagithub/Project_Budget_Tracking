@@ -77,91 +77,184 @@ class EstimationSerializer(serializers.ModelSerializer):
         return getattr(obj, "payment_summary", {})
 
 
-    def validate(self, attrs):
+    # def validate(self, attrs):
     
-        project = attrs.get('project') or getattr(self.instance, 'project', None)
+    #     project = attrs.get('project') or getattr(self.instance, 'project', None)
+    #     if not project:
+    #         raise serializers.ValidationError("Project is required.")
+    #     if not Project.objects.filter(id=project.id, is_active=True).exists():
+    #         raise serializers.ValidationError("Active project not found.")
+
+    #     # --- UserRole & Client validation ---
+    #     for field, model, name in [
+    #         ('estimation_provider', UserRole, 'Estimation provider'),
+    #         ('estimation_review', UserRole, 'Estimation reviewer'),
+    #         ('estimation_review_by_client', Client, 'Client reviewer'),
+    #     ]:
+    #         obj = attrs.get(field) or getattr(self.instance, field, None)
+    #         if obj and not model.objects.filter(pk=obj.pk).exists():
+    #             raise serializers.ValidationError(f"{name} is invalid.")
+
+    #     # --- Status validation ---
+    #     purchase_order_status = attrs.get(
+    #         'purchase_order_status',
+    #         getattr(self.instance, 'purchase_order_status', ProjectEstimation.STATUS_PENDING)
+    #     )
+
+    #     allowed_statuses = [choice[0] for choice in ProjectEstimation.STATUS_CHOICES]
+    #     if purchase_order_status not in allowed_statuses:
+    #         raise serializers.ValidationError("Invalid purchase order status.")
+
+    #     # Automatically set is_approved based on status
+    #     attrs['is_approved'] = purchase_order_status == ProjectEstimation.STATUS_APPROVED
+
+    #     # --- Amount validation ---
+    #     initial_amount = attrs.get('initial_amount', getattr(self.instance, 'initial_amount', Decimal('0.00')))
+    #     additional_amount = attrs.get('additional_amount', getattr(self.instance, 'additional_amount', Decimal('0.00')))
+    #     received_amount = attrs.get('received_amount', getattr(self.instance, 'received_amount', Decimal('0.00')))
+    #     if any(a < 0 for a in [initial_amount, additional_amount, received_amount]):
+    #         raise serializers.ValidationError("Amounts cannot be negative.")
+
+    #     total_amount = initial_amount + additional_amount
+    #     if received_amount > total_amount:
+    #         raise serializers.ValidationError({"error":"Received amount cannot exceed total amount."})
+
+    #     # --- Versioning & Creation Rules ---
+    #     if not getattr(self.instance, 'id', None):  # Only on create 
+    #         if ProjectEstimation.objects.filter(
+    #             project=project,
+    #             purchase_order_status__in=[ProjectEstimation.STATUS_APPROVED, ProjectEstimation.STATUS_RECEIVED]
+    #         ).exists():
+    #             raise serializers.ValidationError({"error":
+    #                 "A project already has an Approved/Received estimation. New estimation cannot be created."}
+    #             )
+
+    #         last_estimation = ProjectEstimation.objects.filter(project=project).order_by('-version').first()
+    #         attrs['version'] = (last_estimation.version + 1) if last_estimation else 1
+    #     else:
+    #         attrs['version'] = getattr(self.instance, 'version', 1)
+
+    #         # --- Enforce only one Approved estimation ---
+    #         if purchase_order_status == ProjectEstimation.STATUS_APPROVED:
+    #             approved_exists = ProjectEstimation.objects.filter(
+    #                 project=project,
+    #                 purchase_order_status=ProjectEstimation.STATUS_APPROVED
+    #             ).exclude(id=self.instance.id).exists()
+    #             if approved_exists:
+    #                 raise serializers.ValidationError({"error":
+    #                     "Another estimation is already approved for this project. Cannot approve this one."}
+    #                 )
+
+    #     # --- Date validation ---
+    #     estimation_date = attrs.get('estimation_date', getattr(self.instance, 'estimation_date', timezone.now().date()))
+    #     if estimation_date > timezone.now().date():
+    #         raise serializers.ValidationError({"error":"Estimation date cannot be in the future."})
+
+    #     # --- Auto-calc amounts ---
+    #     attrs['total_amount'] = total_amount
+    #     attrs['pending_amount'] = total_amount - received_amount
+
+    #     # --- Status change check ---
+    #     if self.instance:
+    #         current_status = self.instance.purchase_order_status
+    #         new_status = attrs.get('purchase_order_status', current_status)
+    #         if current_status == ProjectEstimation.STATUS_RECEIVED and new_status != ProjectEstimation.STATUS_RECEIVED:
+    #             raise serializers.ValidationError({"error":"Cannot change status from 'Received'"})
+
+    #     return attrs
+    def validate(self, attrs):
+        instance = getattr(self, 'instance', None)
+        project = attrs.get('project') or getattr(instance, 'project', None)
+        
+        # ===== Project Validation =====
         if not project:
             raise serializers.ValidationError("Project is required.")
         if not Project.objects.filter(id=project.id, is_active=True).exists():
             raise serializers.ValidationError("Active project not found.")
 
-        # --- UserRole & Client validation ---
+        # ===== UserRole & Client Validation =====
         for field, model, name in [
             ('estimation_provider', UserRole, 'Estimation provider'),
             ('estimation_review', UserRole, 'Estimation reviewer'),
             ('estimation_review_by_client', Client, 'Client reviewer'),
         ]:
-            obj = attrs.get(field) or getattr(self.instance, field, None)
+            obj = attrs.get(field) or getattr(instance, field, None)
             if obj and not model.objects.filter(pk=obj.pk).exists():
                 raise serializers.ValidationError(f"{name} is invalid.")
 
-        # --- Status validation ---
-        purchase_order_status = attrs.get(
+        # ===== Status Validation =====
+        new_status = attrs.get(
             'purchase_order_status',
-            getattr(self.instance, 'purchase_order_status', ProjectEstimation.STATUS_PENDING)
+            getattr(instance, 'purchase_order_status', ProjectEstimation.STATUS_PENDING)
         )
 
-        allowed_statuses = [choice[0] for choice in ProjectEstimation.STATUS_CHOICES]
-        if purchase_order_status not in allowed_statuses:
-            raise serializers.ValidationError("Invalid purchase order status.")
+        # Prevent creating or updating directly to RECEIVED
+        if new_status == ProjectEstimation.STATUS_RECEIVED:
+            if not instance:
+                raise serializers.ValidationError({
+                    "purchase_order_status": "Cannot create a new estimation as 'Received'. Must be Approved first."
+                })
+            if instance.purchase_order_status != ProjectEstimation.STATUS_APPROVED:
+                raise serializers.ValidationError({
+                    "purchase_order_status": "Cannot mark as 'Received' unless estimation is Approved."
+                })
 
         # Automatically set is_approved based on status
-        attrs['is_approved'] = purchase_order_status == ProjectEstimation.STATUS_APPROVED
+        attrs['is_approved'] = new_status == ProjectEstimation.STATUS_APPROVED
 
-        # --- Amount validation ---
-        initial_amount = attrs.get('initial_amount', getattr(self.instance, 'initial_amount', Decimal('0.00')))
-        additional_amount = attrs.get('additional_amount', getattr(self.instance, 'additional_amount', Decimal('0.00')))
-        received_amount = attrs.get('received_amount', getattr(self.instance, 'received_amount', Decimal('0.00')))
+        # ===== Amount Validation =====
+        initial_amount = attrs.get('initial_amount', getattr(instance, 'initial_amount', Decimal('0.00')))
+        additional_amount = attrs.get('additional_amount', getattr(instance, 'additional_amount', Decimal('0.00')))
+        received_amount = attrs.get('received_amount', getattr(instance, 'received_amount', Decimal('0.00')))
+
         if any(a < 0 for a in [initial_amount, additional_amount, received_amount]):
             raise serializers.ValidationError("Amounts cannot be negative.")
 
         total_amount = initial_amount + additional_amount
         if received_amount > total_amount:
-            raise serializers.ValidationError({"error":"Received amount cannot exceed total amount."})
+            raise serializers.ValidationError({"error": "Received amount cannot exceed total amount."})
 
-        # --- Versioning & Creation Rules ---
-        if not getattr(self.instance, 'id', None):  # Only on create 
+        attrs['total_amount'] = total_amount
+        attrs['pending_amount'] = total_amount - received_amount
+
+        # ===== Versioning & Creation Rules =====
+        if not instance:  # Only on create
             if ProjectEstimation.objects.filter(
                 project=project,
                 purchase_order_status__in=[ProjectEstimation.STATUS_APPROVED, ProjectEstimation.STATUS_RECEIVED]
             ).exists():
                 raise serializers.ValidationError({"error":
-                    "A project already has an Approved/Received estimation. New estimation cannot be created."}
-                )
+                    "A project already has an Approved/Received estimation. New estimation cannot be created."
+                })
 
             last_estimation = ProjectEstimation.objects.filter(project=project).order_by('-version').first()
             attrs['version'] = (last_estimation.version + 1) if last_estimation else 1
         else:
-            attrs['version'] = getattr(self.instance, 'version', 1)
+            attrs['version'] = getattr(instance, 'version', 1)
 
-            # --- Enforce only one Approved estimation ---
-            if purchase_order_status == ProjectEstimation.STATUS_APPROVED:
+            # Enforce only one Approved estimation
+            if new_status == ProjectEstimation.STATUS_APPROVED:
                 approved_exists = ProjectEstimation.objects.filter(
                     project=project,
                     purchase_order_status=ProjectEstimation.STATUS_APPROVED
-                ).exclude(id=self.instance.id).exists()
+                ).exclude(id=instance.id).exists()
                 if approved_exists:
                     raise serializers.ValidationError({"error":
-                        "Another estimation is already approved for this project. Cannot approve this one."}
-                    )
+                        "Another estimation is already approved for this project. Cannot approve this one."
+                    })
 
-        # --- Date validation ---
-        estimation_date = attrs.get('estimation_date', getattr(self.instance, 'estimation_date', timezone.now().date()))
+        # ===== Date Validation =====
+        estimation_date = attrs.get('estimation_date', getattr(instance, 'estimation_date', timezone.now().date()))
         if estimation_date > timezone.now().date():
-            raise serializers.ValidationError({"error":"Estimation date cannot be in the future."})
+            raise serializers.ValidationError({"error": "Estimation date cannot be in the future."})
 
-        # --- Auto-calc amounts ---
-        attrs['total_amount'] = total_amount
-        attrs['pending_amount'] = total_amount - received_amount
-
-        # --- Status change check ---
-        if self.instance:
-            current_status = self.instance.purchase_order_status
-            new_status = attrs.get('purchase_order_status', current_status)
-            if current_status == ProjectEstimation.STATUS_RECEIVED and new_status != ProjectEstimation.STATUS_RECEIVED:
-                raise serializers.ValidationError({"error":"Cannot change status from 'Received'"})
+        # ===== Prevent status change from RECEIVED =====
+        if instance and instance.purchase_order_status == ProjectEstimation.STATUS_RECEIVED and new_status != ProjectEstimation.STATUS_RECEIVED:
+            raise serializers.ValidationError({"error": "Cannot change status from 'Received'."})
 
         return attrs
+
+            
 
 
 
@@ -175,12 +268,12 @@ class EstimationSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         if validated_data.get("purchase_order_status") == ProjectEstimation.STATUS_RECEIVED:
-            validated_data["received_amount"] = instance.total_amount
-            validated_data["pending_amount"] = Decimal("0.00")
+            raise serializers.ValidationError({
+                "purchase_order_status": "Cannot mark as 'Received' via update. Use receive_money() method."
+            })
         instance = super().update(instance, validated_data)
         instance.save()
         return instance
-
 class ChangeRequestSerializer(serializers.ModelSerializer):
     project_name = serializers.SerializerMethodField()
     requested_by_name = serializers.SerializerMethodField()
@@ -250,6 +343,62 @@ class HoldSerializer(serializers.ModelSerializer):
 from decimal import Decimal
 from rest_framework import serializers
 
+# class ProjectPaymentTrackingSerializer(serializers.ModelSerializer):
+#     milestones = ProjectPaymentMilestoneSerializer(many=True, read_only=True)
+#     holds = HoldSerializer(many=True, read_only=True)
+    
+#     total_available_budget = serializers.SerializerMethodField()
+#     total_milestones_amount = serializers.SerializerMethodField()
+#     completed_milestones_amount = serializers.SerializerMethodField()
+#     total_holds_amount = serializers.SerializerMethodField()
+#     pending = serializers.SerializerMethodField()
+#     budget_utilization_percentage = serializers.SerializerMethodField()
+#     created_by = serializers.SerializerMethodField()
+#     modified_by = serializers.SerializerMethodField()
+
+#     class Meta:
+#         model = ProjectPaymentTracking
+#         fields = [
+#             "id", "project", "payment_type", "resource", "currency",
+#             "approved_budget", "additional_amount",
+#             "payout", "retention_amount", "penalty_amount",
+#             "total_available_budget", "total_milestones_amount", "completed_milestones_amount",
+#             "total_holds_amount", "pending", "budget_utilization_percentage",
+#             "is_budget_locked", "budget_exceeded_approved",
+#             "created_by", "modified_by", "created_at", "modified_at",
+#             "milestones", "holds",
+#         ]
+#         read_only_fields = [
+#             "created_at", "modified_at", "total_available_budget", "total_milestones_amount",
+#             "completed_milestones_amount", "total_holds_amount", "pending", "budget_utilization_percentage",
+#             "milestones", "holds",
+#         ]
+
+  
+#     def get_total_available_budget(self, obj):
+#         return obj.total_available_budget
+
+#     def get_total_milestones_amount(self, obj):
+#         return obj.total_milestones_amount
+
+#     def get_completed_milestones_amount(self, obj):
+#         return obj.completed_milestones_amount
+
+#     def get_total_holds_amount(self, obj):
+#         return obj.total_holds_amount
+
+#     def get_pending(self, obj):
+#         return obj.pending
+
+#     def get_budget_utilization_percentage(self, obj):
+#         return obj.budget_utilization_percentage
+
+#     def get_created_by(self, obj):
+#         return getattr(obj.created_by, "username", None)
+
+#     def get_modified_by(self, obj):
+#         return getattr(obj.modified_by, "username", None)
+
 class ProjectPaymentTrackingSerializer(serializers.ModelSerializer):
     milestones = ProjectPaymentMilestoneSerializer(many=True, read_only=True)
     holds = HoldSerializer(many=True, read_only=True)
@@ -257,9 +406,11 @@ class ProjectPaymentTrackingSerializer(serializers.ModelSerializer):
     total_available_budget = serializers.SerializerMethodField()
     total_milestones_amount = serializers.SerializerMethodField()
     completed_milestones_amount = serializers.SerializerMethodField()
+    calculated_payout_from_milestones = serializers.SerializerMethodField()
     total_holds_amount = serializers.SerializerMethodField()
     pending = serializers.SerializerMethodField()
     budget_utilization_percentage = serializers.SerializerMethodField()
+    payout_variance = serializers.SerializerMethodField()
     created_by = serializers.SerializerMethodField()
     modified_by = serializers.SerializerMethodField()
 
@@ -268,7 +419,8 @@ class ProjectPaymentTrackingSerializer(serializers.ModelSerializer):
         fields = [
             "id", "project", "payment_type", "resource", "currency",
             "approved_budget", "additional_amount",
-            "payout", "retention_amount", "penalty_amount",
+            "payout", "is_payout_manual", "calculated_payout_from_milestones", "payout_variance",
+            "retention_amount", "penalty_amount",
             "total_available_budget", "total_milestones_amount", "completed_milestones_amount",
             "total_holds_amount", "pending", "budget_utilization_percentage",
             "is_budget_locked", "budget_exceeded_approved",
@@ -277,36 +429,40 @@ class ProjectPaymentTrackingSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "created_at", "modified_at", "total_available_budget", "total_milestones_amount",
-            "completed_milestones_amount", "total_holds_amount", "pending", "budget_utilization_percentage",
+            "completed_milestones_amount", "calculated_payout_from_milestones", "payout_variance",
+            "total_holds_amount", "pending", "budget_utilization_percentage",
             "milestones", "holds",
         ]
 
-  
     def get_total_available_budget(self, obj):
-        return obj.total_available_budget
+        return str(obj.total_available_budget)
 
     def get_total_milestones_amount(self, obj):
-        return obj.total_milestones_amount
+        return str(obj.total_milestones_amount)
 
     def get_completed_milestones_amount(self, obj):
-        return obj.completed_milestones_amount
+        return str(obj.completed_milestones_amount)
+
+    def get_calculated_payout_from_milestones(self, obj):
+        return str(obj.calculated_payout_from_milestones)
 
     def get_total_holds_amount(self, obj):
-        return obj.total_holds_amount
+        return str(obj.total_holds_amount)
 
     def get_pending(self, obj):
-        return obj.pending
+        return str(obj.pending)
 
     def get_budget_utilization_percentage(self, obj):
-        return obj.budget_utilization_percentage
+        return str(obj.budget_utilization_percentage)
+
+    def get_payout_variance(self, obj):
+        return str(obj.payout_variance)
 
     def get_created_by(self, obj):
-        return getattr(obj.created_by, "username", None)
+        return getattr(obj.created_by, "username", None) if obj.created_by else None
 
     def get_modified_by(self, obj):
-        return getattr(obj.modified_by, "username", None)
-
-
+        return getattr(obj.modified_by, "username", None) if obj.modified_by else None
 class ProjectPaymentTrackingUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProjectPaymentTracking
